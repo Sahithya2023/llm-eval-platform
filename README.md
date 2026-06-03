@@ -73,3 +73,73 @@ scripts/     (later) CLI entry points
 data/        SQLite database (gitignored)
 tests/       tests
 ```
+
+## Stage 2 — Spider dataset loader
+
+Stage 2 adds a standalone loader for the [Spider](https://yale-lily.github.io/spider)
+Text-to-SQL benchmark and a script to verify that examples load and that every
+`db_id` resolves to a real SQLite file. The loader depends only on the standard
+library — it does not import FastAPI, SQLAlchemy, or any evaluation code.
+
+### Install
+
+```bash
+pip install -r requirements.txt   # now also installs pytest
+```
+
+### Download Spider
+
+Spider is distributed by the Yale LILY group. Download the Spider 1.0 release
+from the official project page (linked above; the current download link is in
+the Spider GitHub README) and extract it so the contents live under
+`data/benchmark/spider/`.
+
+### Set the benchmark path
+
+The loader defaults to `./data/benchmark/spider`. To use a different location,
+set it in `.env`:
+
+```bash
+SPIDER_DIR=/absolute/path/to/spider
+```
+
+### Expected structure under `data/benchmark/`
+
+```
+data/benchmark/spider/
+├── dev.json
+├── train_spider.json
+├── train_others.json        (optional)
+├── tables.json
+└── database/
+    ├── concert_singer/
+    │   └── concert_singer.sqlite
+    ├── pets_1/
+    │   └── pets_1.sqlite
+    └── ...                   (one folder per db_id)
+```
+
+### Verify
+
+```bash
+python scripts/check_spider.py
+```
+
+Expected (values depend on your data):
+
+```
+Loaded examples   : 50
+Unique databases  : 17
+All 17 databases resolved successfully.
+...
+Stage 2 check passed: Spider loads and db_id mapping is valid.
+```
+
+### Run tests
+
+The tests are hermetic (they build a tiny synthetic dataset), so no Spider
+download is required:
+
+```bash
+pytest -q
+```

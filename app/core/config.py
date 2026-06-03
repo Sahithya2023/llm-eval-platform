@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/traces.db"
     data_dir: str = "./data"
 
+    # --- Benchmark dataset (Stage 2) ---
+    # Root of the extracted Spider release. Override with SPIDER_DIR in .env.
+    spider_dir: str = "./data/benchmark/spider"
+
     # --- LLM connection (wired up from Stage 2 onward; defined here so all
     #     configuration lives in one place) ---
     openai_api_key: str = ""

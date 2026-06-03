@@ -13,3 +13,6 @@ requests>=2.31
 
 # LLM client (wired up in Stage 2)
 openai>=1.30
+
+# Dev / testing
+pytest>=8.0
