@@ -1,0 +1,15 @@
+# Core (used in Stage 1)
+SQLAlchemy>=2.0,<3.0
+pydantic>=2.6,<3.0
+pydantic-settings>=2.2,<3.0
+python-dotenv>=1.0
+
+# Backend + dashboard (wired up in later stages)
+fastapi>=0.110
+uvicorn[standard]>=0.29
+streamlit>=1.33
+pandas>=2.2
+requests>=2.31
+
+# LLM client (wired up in Stage 2)
+openai>=1.30
