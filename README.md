@@ -143,3 +143,57 @@ download is required:
 ```bash
 pytest -q
 ```
+
+## Stage 3 — Execution oracle (executor + comparator)
+
+Stage 3 adds the execution-based correctness oracle. It is the foundation for
+every accuracy metric the platform reports: instead of comparing SQL strings,
+we **execute** the generated SQL and compare its result set to the gold result.
+
+The evaluation layer stays independent of the API/UI layers — `app/eval` imports
+only the Python standard library and can be driven from a CLI or a service
+without modification.
+
+### Components
+
+- `app/eval/executor.py` — `SqlExecutor`: runs SQL **read-only** against a
+  Spider SQLite database. The database is opened in SQLite `mode=ro`, so any
+  write is rejected by the engine. Queries are bounded by a wall-clock timeout
+  (via a progress handler) and a row cap. Results come back as a structured
+  `ExecutionResult(rows, columns, error, error_type, truncated)`; query failures
+  are returned, never raised.
+- `app/eval/comparator.py` — the oracle. Compares two result sets by execution
+  semantics and returns `Comparison(is_correct, reason, order_considered)`.
+
+### Comparison semantics (frozen)
+
+1. **Multiset (bag) comparison** — row multiplicity matters
+   (`SELECT name` ≠ `SELECT DISTINCT name`).
+2. **Strict positional columns** — column count and order must match.
+3. **Ordering from the gold SQL only** — rows are compared in order iff the
+   gold query has a top-level `ORDER BY`, otherwise as an unordered multiset.
+4. **Numeric normalization** — `5 == 5.0`, `True == 1`, floats compared with a
+   small tolerance.
+5. **Strict, exact strings** — no case-folding, no trimming.
+6. **NULL equals only NULL**.
+
+### Usage
+
+```python
+from app.eval import SqlExecutor, compare_executions
+
+executor = SqlExecutor(timeout_s=5.0)
+gold = executor.execute(db_path, gold_sql)
+pred = executor.execute(db_path, generated_sql)
+
+verdict = compare_executions(gold, pred, gold_sql)
+print(verdict.is_correct, verdict.reason)
+```
+
+### Run tests
+
+Hermetic, as before (synthetic SQLite fixtures; no Spider download needed):
+
+```bash
+pytest -q
+```
