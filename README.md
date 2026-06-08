@@ -249,3 +249,49 @@ API key is needed:
 ```bash
 pytest -q
 ```
+
+## Stage 5 — Evaluation runner (orchestration)
+
+Stage 5 wires the standalone Stage 2-4 components into an actual evaluation. For
+each example it derives a schema context, generates SQL with the Stage 4 client,
+executes the predicted and gold queries with the Stage 3 executor, and judges
+the result with the execution oracle — producing an `EvaluationRecord`. A batch
+run also returns an aggregate `EvaluationSummary`.
+
+This stage is orchestration only: no persistence, API, dashboard, or database
+writes. The runner imports no web-framework, ORM, UI, or SDK code directly, and
+every collaborator is injectable (LLM client, SQL executor, schema provider,
+comparator), so it can be tested entirely with fakes.
+
+### Behaviour
+
+- `run_example(example) -> EvaluationRecord` and
+  `run_examples(examples) -> tuple[list[EvaluationRecord], EvaluationSummary]`.
+- Never raises for ordinary failures: a generation failure skips execution and
+  is recorded in `generation_error`; a predicted-query execution failure is
+  recorded in `execution_error`; a failing gold query is surfaced via
+  `comparison_reason` (and the example is marked incorrect).
+- The summary reports counts, `accuracy` (`correct / total`, or `0.0` when
+  empty), aggregated token usage and estimated cost, and average latency.
+- Schema context comes from an injectable `schema_provider`; the default reads
+  `CREATE TABLE` statements from the SQLite file read-only.
+
+### Usage
+
+```python
+from app.datasets.spider_loader import SpiderLoader
+from app.services import EvaluationRunner
+
+loader = SpiderLoader("./data/benchmark/spider", split="dev", limit=50)
+records, summary = EvaluationRunner().run_examples(loader)
+print(f"accuracy={summary.accuracy:.2%}  cost=${summary.total_estimated_cost:.4f}")
+```
+
+### Run tests
+
+Hermetic — fakes stand in for the LLM client, executor, comparator and schema
+provider, so no network access, API key, or Spider download is needed:
+
+```bash
+pytest -q
+```
