@@ -17,6 +17,7 @@ from app.eval.executor import (
     ExecutionResult,
     SqlExecutor,
 )
+from app.eval.llm_client import GenerationResult, TextToSqlClient
 
 __all__ = [
     "SqlExecutor",
@@ -28,4 +29,6 @@ __all__ = [
     "compare_result_sets",
     "compare_executions",
     "gold_requires_order",
+    "TextToSqlClient",
+    "GenerationResult",
 ]

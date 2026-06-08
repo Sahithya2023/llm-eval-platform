@@ -197,3 +197,55 @@ Hermetic, as before (synthetic SQLite fixtures; no Spider download needed):
 ```bash
 pytest -q
 ```
+
+## Stage 4 — LLM client (Text-to-SQL generation)
+
+Stage 4 adds the generation layer: it turns a natural-language question plus a
+schema description into SQL, capturing the metadata later stages persist to a
+trace (model, prompt version, deterministic prompt hash, token usage, estimated
+cost, latency). It is standalone — at import time it depends only on the Python
+standard library; the OpenAI SDK and the settings layer are imported lazily, so
+importing `app.eval` stays lightweight and never fails on a missing SDK. This
+stage only *generates* SQL; running and judging it remain the job of the
+Stage 3 executor and comparator.
+
+### Behaviour
+
+- `TextToSqlClient.generate_sql(question, schema_context)` returns a
+  `GenerationResult` and **never raises**: any failure (missing SDK, bad
+  configuration, API error, timeout, malformed response) comes back as
+  `GenerationResult.error`, with `model`, `prompt_version`, `prompt_hash` and
+  `latency_ms` populated even on failure.
+- Model output is defensively cleaned (stray markdown code fences stripped).
+- Cost is estimated from a centralised per-model price table; an unknown model
+  or missing token usage yields `estimated_cost = None` rather than a guess.
+
+### Configuration
+
+Read from the existing settings (`.env`): `OPENAI_API_KEY`, `OPENAI_BASE_URL`,
+`LLM_MODEL`, `DEFAULT_TEMPERATURE`, `DEFAULT_PROMPT_VERSION`.
+
+### Usage
+
+```python
+from app.eval import TextToSqlClient
+
+client = TextToSqlClient()
+result = client.generate_sql(
+    question="How many singers are there?",
+    schema_context="CREATE TABLE singer (id INTEGER, name TEXT);",
+)
+if result.ok:
+    print(result.sql, result.total_tokens, result.estimated_cost)
+else:
+    print("generation failed:", result.error)
+```
+
+### Run tests
+
+Hermetic — a `FakeClient` stands in for the OpenAI SDK, so no network access or
+API key is needed:
+
+```bash
+pytest -q
+```
