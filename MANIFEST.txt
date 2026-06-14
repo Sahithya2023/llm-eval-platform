@@ -1,0 +1,26 @@
+Stage 6 — Persistence + Repository + Service + API layer
+=========================================================
+
+Drop these into the root of the llm-eval-platform repository (paths preserved).
+
+CREATED (new files):
+  app/db/eval_models.py                  ORM models: evaluation_runs, evaluation_records
+  app/db/repository.py                   Repository abstraction + SQLAlchemy impl
+  app/services/persistence_service.py    PersistentEvaluationService (composes runner + repo)
+  app/schemas/evaluation.py              Pydantic request/response/validation models
+  app/api/deps.py                        FastAPI dependency chain (overridable)
+  app/api/routes.py                      POST/GET /runs, /runs/{id}, /runs/{id}/records
+  app/api/app.py                         create_app() factory + lifespan schema init
+  app/main.py                            ASGI entrypoint (uvicorn app.main:app)
+  tests/test_repository.py               Repository tests (in-memory SQLite)
+  tests/test_persistence_service.py      Service composition + DI tests
+  tests/test_api.py                      API tests via TestClient + dependency overrides
+
+MODIFIED (additive only; were empty or exports-only — no frozen file touched):
+  app/db/__init__.py                     Registers both model modules on Base
+  app/services/__init__.py               Adds PersistentEvaluationService export (Stage 5 exports kept)
+  app/schemas/__init__.py                Exports new schemas
+  app/api/__init__.py                    Exports create_app
+
+Frozen Stage 2-5 files were NOT modified.
+Full suite: 125 passed (101 existing + 24 new).
