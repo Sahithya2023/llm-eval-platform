@@ -1,7 +1,30 @@
+# Python
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environment
 .venv/
 venv/
-.env
-data/*.db
+
+# IDE
+.vscode/
+.idea/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Benchmark datasets
+data/benchmark/
+
+# OS files
 .DS_Store
+Thumbs.db
