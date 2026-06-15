@@ -1,19 +1,17 @@
-"""Stage 6 persistence models — evaluation runs and per-example records.
+"""Stage 6 + 7 persistence models — evaluation runs and per-example records.
 
-Stage 1 introduced a single ``traces`` table (the :class:`~app.db.models.Trace`
-model). Stage 6 needs to persist two *new* shapes that arrive straight from the
-frozen Stage 5 runner:
+Stage 6 added two dedicated tables (``evaluation_runs`` / ``evaluation_records``)
+that map 1:1 onto the Stage 5 NamedTuples.  Stage 7 (Phase 1) extends
+``evaluation_runs`` with a proper job lifecycle:
 
-* an :class:`~app.services.evaluation_runner.EvaluationSummary` (run-level
-  metadata + aggregate metrics), and
-* a list of :class:`~app.services.evaluation_runner.EvaluationRecord`
-  (per-example outcomes, including the three distinct error/reason fields the
-  ``traces`` table cannot represent losslessly).
+* ``status``       — pending | running | completed | failed   (default: pending)
+* ``started_at``   — set when the worker begins execution
+* ``finished_at``  — set when the run reaches a terminal state
+* ``error``        — populated only on ``failed`` runs; stores the error message
 
-Rather than overload ``traces`` (and risk a lossy mapping), Stage 6 adds two
-dedicated tables that map 1:1 onto those NamedTuples. They are registered on the
-*same* declarative ``Base`` as ``Trace``, so ``init_db`` creates them with no
-change to the Stage 1 init script. ``Trace`` is left exactly as-is.
+``started_at`` / ``finished_at`` / ``error`` are all nullable so that the
+schema is additive: rows created by the Stage 6 path (``create_run``) that jump
+straight to ``completed`` simply leave those fields ``NULL``.
 
 ORM classes use a ``*Model`` suffix so they never shadow the Stage 5
 ``EvaluationRecord`` / ``EvaluationSummary`` NamedTuples or the Pydantic schemas.
@@ -21,7 +19,7 @@ ORM classes use a ``*Model`` suffix so they never shadow the Stage 5
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     Boolean,
@@ -35,21 +33,53 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-# Share the Stage 1 declarative base so every model lives in one metadata and
-# is created together by Base.metadata.create_all (used by init_db).
+# Share the declarative base so every model lives in one metadata and is
+# created together by Base.metadata.create_all (used by init_db).
 from app.db.models import Base
+
+
+def _utcnow() -> datetime:
+    """Return the current time as a timezone-aware UTC datetime.
+
+    Used as the ORM ``default`` callable for ``DateTime`` columns, replacing the
+    deprecated ``datetime.utcnow`` (which returns a naive datetime and is
+    scheduled for removal in a future Python version).
+    """
+    return datetime.now(timezone.utc)
+
+
+# Valid lifecycle states for an evaluation run.
+# Kept as module-level constants so other modules can reference them without
+# importing magic strings.
+STATUS_PENDING = "pending"
+STATUS_RUNNING = "running"
+STATUS_COMPLETED = "completed"
+STATUS_FAILED = "failed"
 
 
 class EvaluationRunModel(Base):
     """One evaluation run: configuration/metadata plus the aggregate summary.
 
-    The summary columns mirror :class:`EvaluationSummary` exactly so a stored
-    run can be returned through the API without recomputation.
+    Lifecycle
+    ---------
+    pending   → the run row has been created but execution has not started.
+    running   → a worker has claimed the run and evaluation is in progress.
+    completed → execution finished successfully; summary columns are populated.
+    failed    → a run-level infrastructure error occurred (dataset load, DB,
+                unexpected exception).  Per-example errors do *not* trigger
+                ``failed``; those are captured in ``EvaluationRecordModel``
+                and the run still completes normally.
+
+    The summary columns mirror :class:`~app.services.evaluation_runner.EvaluationSummary`
+    exactly so a stored run can be returned through the API without recomputation.
+    Summary columns default to 0 / 0.0 and are meaningful only when
+    ``status == "completed"``.
     """
 
     __tablename__ = "evaluation_runs"
 
-    # run_id is a string (uuid hex) to match the Trace.run_id convention.
+    # Primary key is a uuid hex string to match the existing Trace.run_id
+    # convention and to be URL-safe without encoding.
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
 
     # --- run metadata / configuration ---
@@ -60,9 +90,19 @@ class EvaluationRunModel(Base):
     dataset_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     prompt_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    status: Mapped[str] = mapped_column(String(32), default="completed")
+
+    # --- lifecycle ---
+    # Default is now "pending"; Stage 6's create_run passes status="completed"
+    # explicitly so existing behaviour is unchanged.
+    status: Mapped[str] = mapped_column(String(32), default=STATUS_PENDING)
+    # Timestamps for the execution window (NULL until the relevant transition).
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Non-NULL only on failed runs; stores the exception / error message.
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # --- aggregate summary (1:1 with EvaluationSummary) ---
+    # All default to 0 / 0.0; populated atomically when status → completed.
     total_examples: Mapped[int] = mapped_column(Integer, default=0)
     correct: Mapped[int] = mapped_column(Integer, default=0)
     incorrect: Mapped[int] = mapped_column(Integer, default=0)
@@ -77,7 +117,7 @@ class EvaluationRunModel(Base):
 
     # --- bookkeeping ---
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, server_default=func.now(), index=True
+        DateTime, default=_utcnow, server_default=func.now(), index=True
     )
 
     records: Mapped[list["EvaluationRecordModel"]] = relationship(
@@ -88,13 +128,13 @@ class EvaluationRunModel(Base):
 
     def __repr__(self) -> str:
         return (
-            f"<EvaluationRunModel id={self.id!r} "
+            f"<EvaluationRunModel id={self.id!r} status={self.status!r} "
             f"accuracy={self.accuracy} total={self.total_examples}>"
         )
 
 
 class EvaluationRecordModel(Base):
-    """One persisted per-example outcome (1:1 with :class:`EvaluationRecord`)."""
+    """One persisted per-example outcome (1:1 with :class:`~app.services.evaluation_runner.EvaluationRecord`)."""
 
     __tablename__ = "evaluation_records"
 
@@ -124,7 +164,7 @@ class EvaluationRecordModel(Base):
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, server_default=func.now()
+        DateTime, default=_utcnow, server_default=func.now()
     )
 
     run: Mapped["EvaluationRunModel"] = relationship(back_populates="records")

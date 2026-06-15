@@ -1,4 +1,4 @@
-"""Tests for the Stage 6 persistence service.
+"""Tests for the Stage 6 + 7 persistence service.
 
 The service is verified two ways:
   * with a *fake* repository, to prove it composes the runner + repository and
@@ -6,6 +6,11 @@ The service is verified two ways:
   * with the *real* repository on an in-memory DB, to prove the full write path.
 
 The Stage 5 runner is always faked, so no network / LLM / Spider is touched.
+
+Stage 7 (Phase 1) adds tests for ``create_pending`` and
+``execute_and_finalize``.  All Stage 6 tests are preserved exactly.
+The ``FakeRepo`` is extended with the three new lifecycle methods so the
+service's new paths can be exercised without a real DB.
 """
 
 from __future__ import annotations
@@ -68,22 +73,30 @@ def _summary(records):
 class FakeRunner:
     """Stands in for the frozen Stage 5 EvaluationRunner."""
 
-    def __init__(self, records):
+    def __init__(self, records, *, raise_on_run=False):
         self._records = records
+        self._raise_on_run = raise_on_run
         self.calls = []
 
     def run_examples(self, examples):
-        # Record that we were called with the examples the service forwarded.
         self.calls.append(list(examples))
+        if self._raise_on_run:
+            raise RuntimeError("simulated runner failure")
         return self._records, _summary(self._records)
 
 
 class FakeRepo:
-    """In-memory fake honouring AbstractEvaluationRepository."""
+    """In-memory fake honouring AbstractEvaluationRepository.
+
+    Extended in Stage 7 with the three new lifecycle methods so the service's
+    new paths can be tested without a real DB session.
+    """
 
     def __init__(self):
         self.runs = {}
         self.records = {}
+
+    # -- Stage 6 methods (unchanged) --------------------------------------- #
 
     def save_run(self, *, run_id, metadata, summary):
         from types import SimpleNamespace
@@ -101,7 +114,14 @@ class FakeRepo:
 
         run_id = run_id or "fake-run"
         run = SimpleNamespace(
-            id=run_id, metadata=metadata, summary=summary, records=list(records)
+            id=run_id,
+            status=metadata.status,
+            metadata=metadata,
+            summary=summary,
+            records=list(records),
+            started_at=None,
+            finished_at=None,
+            error=None,
         )
         self.runs[run_id] = run
         self.records[run_id] = list(records)
@@ -115,6 +135,44 @@ class FakeRepo:
 
     def get_records(self, run_id):
         return self.records.get(run_id, [])
+
+    # -- Stage 7 lifecycle methods ----------------------------------------- #
+
+    def create_pending_run(self, *, metadata, run_id=None):
+        from types import SimpleNamespace
+
+        run_id = run_id or f"fake-{len(self.runs)}"
+        run = SimpleNamespace(
+            id=run_id,
+            status="pending",
+            name=metadata.name,
+            started_at=None,
+            finished_at=None,
+            error=None,
+            total_examples=0,
+            accuracy=0.0,
+        )
+        self.runs[run_id] = run
+        return run
+
+    def set_status(self, run_id, status, *, error=None):
+        run = self.runs.get(run_id)
+        if run is None:
+            return None
+        run.status = status
+        if error is not None:
+            run.error = error
+        return run
+
+    def finalize_run(self, run_id, *, records, summary):
+        run = self.runs.get(run_id)
+        if run is None:
+            return None
+        run.status = "completed"
+        run.total_examples = summary.total_examples
+        run.accuracy = summary.accuracy
+        self.records[run_id] = list(records)
+        return run
 
 
 @pytest.fixture()
@@ -135,7 +193,7 @@ def real_repo():
 
 
 # --------------------------------------------------------------------------- #
-# Composition with a fake repository                                           #
+# Stage 6: composition with a fake repository (frozen)                        #
 # --------------------------------------------------------------------------- #
 
 def test_run_and_persist_invokes_runner_then_repository():
@@ -178,7 +236,7 @@ def test_read_helpers_delegate_to_repository():
 
 
 # --------------------------------------------------------------------------- #
-# Full write path against the real repository                                  #
+# Stage 6: full write path against the real repository (frozen)               #
 # --------------------------------------------------------------------------- #
 
 def test_run_and_persist_writes_through_to_db(real_repo):
@@ -193,3 +251,98 @@ def test_run_and_persist_writes_through_to_db(real_repo):
     assert persisted.total_examples == 2
     assert persisted.correct == 1
     assert len(service.get_records(run.id)) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Stage 7: create_pending                                                      #
+# --------------------------------------------------------------------------- #
+
+def test_create_pending_returns_pending_run():
+    repo = FakeRepo()
+    service = PersistentEvaluationService(runner=FakeRunner([]), repository=repo)
+
+    run = service.create_pending(RunMetadata(name="async-test"), run_id="p1")
+
+    assert run.id == "p1"
+    assert run.status == "pending"
+    assert repo.get_run("p1") is run
+
+
+def test_create_pending_generates_run_id_when_absent():
+    repo = FakeRepo()
+    service = PersistentEvaluationService(runner=FakeRunner([]), repository=repo)
+
+    run = service.create_pending()
+    assert run.id  # auto-generated
+
+
+def test_create_pending_against_real_repo(real_repo):
+    service = PersistentEvaluationService(runner=FakeRunner([]), repository=real_repo)
+    run = service.create_pending(RunMetadata(name="pending-test", split="dev"))
+
+    assert run.status == "pending"
+    assert run.name == "pending-test"
+    fetched = service.get_run(run.id)
+    assert fetched is not None
+    assert fetched.status == "pending"
+
+
+# --------------------------------------------------------------------------- #
+# Stage 7: execute_and_finalize — happy path                                  #
+# --------------------------------------------------------------------------- #
+
+def test_execute_and_finalize_completes_run():
+    records = [_record("dev_0"), _record("dev_1", is_correct=False)]
+    runner = FakeRunner(records)
+    repo = FakeRepo()
+    service = PersistentEvaluationService(runner=runner, repository=repo)
+
+    run = service.create_pending(RunMetadata(), run_id="e1")
+    final = service.execute_and_finalize("e1", ["ex-a", "ex-b"])
+
+    assert final is not None
+    assert final.status == "completed"
+    assert final.total_examples == 2
+    assert final.accuracy == pytest.approx(0.5)
+    # Runner was called with the examples.
+    assert runner.calls == [["ex-a", "ex-b"]]
+
+
+def test_execute_and_finalize_against_real_repo(real_repo):
+    records = [_record("dev_0"), _record("dev_1", is_correct=False)]
+    runner = FakeRunner(records)
+    service = PersistentEvaluationService(runner=runner, repository=real_repo)
+
+    run = service.create_pending(RunMetadata(split="dev"))
+    final = service.execute_and_finalize(run.id, ["x", "y"])
+
+    assert final is not None
+    assert final.status == "completed"
+    assert final.total_examples == 2
+    assert len(service.get_records(run.id)) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Stage 7: execute_and_finalize — failure paths                               #
+# --------------------------------------------------------------------------- #
+
+def test_execute_and_finalize_runner_failure_marks_failed():
+    repo = FakeRepo()
+    runner = FakeRunner([], raise_on_run=True)
+    service = PersistentEvaluationService(runner=runner, repository=repo)
+
+    service.create_pending(RunMetadata(), run_id="f1")
+    result = service.execute_and_finalize("f1", [])
+
+    assert result is not None
+    assert result.status == "failed"
+    assert result.error is not None
+    assert "RuntimeError" in result.error
+
+
+def test_execute_and_finalize_unknown_run_id_returns_none():
+    repo = FakeRepo()
+    service = PersistentEvaluationService(runner=FakeRunner([]), repository=repo)
+
+    result = service.execute_and_finalize("no-such-id", [])
+    assert result is None

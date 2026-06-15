@@ -1,8 +1,15 @@
-"""API schemas (Stage 6) — request, response, and validation models.
+"""API schemas (Stage 6 + 7) — request, response, and validation models.
 
-Pydantic v2 models that define the API contract. Response models set
-``from_attributes=True`` so they can be built directly from the Stage 6 ORM
-rows returned by the repository, keeping the API layer decoupled from the ORM.
+Stage 7 (Phase 1) adds three nullable lifecycle fields to ``RunResponse``:
+
+    started_at   — when the worker began execution (None while pending)
+    finished_at  — when the run reached a terminal state (None while pending/running)
+    error        — non-None only on failed runs
+
+All three are optional in the response so that Stage 6-created runs (which never
+set those columns) and Stage 7 pending/running runs deserialise without error.
+
+No other contract changes; all Stage 6 request shapes are preserved.
 """
 
 from __future__ import annotations
@@ -61,7 +68,12 @@ class SummaryResponse(BaseModel):
 
 
 class RunResponse(BaseModel):
-    """A persisted run: metadata plus its aggregate summary."""
+    """A persisted run: metadata plus its aggregate summary.
+
+    ``started_at``, ``finished_at``, and ``error`` are new in Stage 7 and
+    are always optional so the schema is backwards-compatible with Stage 6
+    run rows that have NULL in those columns.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -76,7 +88,13 @@ class RunResponse(BaseModel):
     status: str
     created_at: datetime
 
+    # Stage 7 lifecycle timestamps and error (all nullable).
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error: str | None = None
+
     # Summary fields are flattened from the same ORM row.
+    # Values are 0 / 0.0 while the run is pending or running.
     total_examples: int
     correct: int
     incorrect: int
